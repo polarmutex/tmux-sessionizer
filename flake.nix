@@ -1,5 +1,5 @@
 {
-  description = "Build a cargo project";
+  description = "tmux-sessionizer (crab style)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -33,12 +33,16 @@
         # all of that work (e.g. via cachix) when running in CI
         cargoArtifacts = craneLib.buildDepsOnly {
           inherit src;
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.openssl ];
         };
 
         # Build the actual crate itself, reusing the dependency
         # artifacts from above.
         my-crate = craneLib.buildPackage {
           inherit cargoArtifacts src;
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.openssl ];
         };
       in
       {
@@ -96,7 +100,10 @@
           # Extra inputs can be added here
           nativeBuildInputs = with pkgs; [
             cargo
+            openssl
+            pkg-config
             rustc
+            rustfmt
           ];
         };
       });

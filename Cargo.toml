@@ -1,8 +1,19 @@
 [package]
-name = "quick-start"
+name = "tmux-sessionizer"
 version = "0.1.0"
+description = "open tmux sessions for repo projects"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/polarmutex/tmux-sessionizer"
+keywords = ["tmux"]
+categories = ["command-line-utilities"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0"
+clap = "3.1"
+git2 = "0.14"
+shellexpand = "2.1.2"
+skim = "0.9"
