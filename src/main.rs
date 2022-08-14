@@ -7,6 +7,7 @@ use skim::prelude::SkimItemReader;
 use skim::prelude::SkimOptionsBuilder;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -64,10 +65,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         //set_up_tmux_env(found_repo, &repo_name)?;
     }
 
-    execute_tmux_command(&format!(
-        "tmux switch-client -t {}",
-        repo_name.replace('.', "_")
-    ))?;
+    match env::var("TMUX") {
+        Ok(_val) => {
+            execute_tmux_command(&format!(
+                "tmux switch-client -t {}",
+                repo_name.replace('.', "_"),
+            ))?;
+        }
+        Err(_e) => {
+            execute_tmux_command(&format!(
+                "tmux attach-session -t {} -d",
+                repo_name.replace('.', "_"),
+            ))?;
+        }
+    }
     //println!("{}", found_repo.path().display());
     //println!("is-bare {}", found_repo.is_bare());
     //println!("is-worktree {}", found_repo.is_worktree());
@@ -144,6 +155,7 @@ fn execute_tmux_command(command: &str) -> Result<process::Output> {
     let args: Vec<&str> = command.split(' ').skip(1).collect();
     Ok(process::Command::new("tmux")
         .args(args)
+        .stdin(process::Stdio::inherit())
         .output()
         .unwrap_or_else(|_| panic!("Failed to execute the tmux command `{command}`")))
 }
