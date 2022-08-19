@@ -135,13 +135,15 @@ fn get_single_selection(repos: &HashMap<OsString, Repository>) -> Result<String>
     let options = SkimOptionsBuilder::default()
         .height(Some("50%"))
         .multi(false)
-        .color(Some("bw"))
+        .color(Some("dark"))
         .build()
         .unwrap();
     let item_reader = SkimItemReader::default();
     let mut skim_str = String::new();
-    for name in repos.keys() {
-        skim_str.push_str(&format!("{}\n", name.clone().into_string().unwrap()));
+    let mut repos_vec: Vec<(&OsString, &Repository)> = repos.iter().collect();
+    repos_vec.sort_by(|a, b| a.0.cmp(b.0));
+    for name in repos_vec {
+        skim_str.push_str(&format!("{}\n", name.0.clone().into_string().unwrap()));
     }
     let item = item_reader.of_bufread(Cursor::new(skim_str));
     let skim_output = Skim::run_with(&options, Some(item)).unwrap();
