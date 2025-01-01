@@ -20,11 +20,10 @@ use tmux_sessionizer::cli::create_app;
 fn main() -> Result<(), Box<dyn Error>> {
     let _cli_args = create_app();
 
-    let mut repo_list = Vec::new();
-    repo_list.push(PathBuf::from(
-        tilde("~/repos/personal").to_string().as_str(),
-    ));
-    repo_list.push(PathBuf::from(tilde("~/repos/work").to_string().as_str()));
+    let repo_list = vec![
+        PathBuf::from(tilde("~/repos/personal").to_string().as_str()),
+        PathBuf::from(tilde("~/repos/work").to_string().as_str()),
+    ];
 
     let repos = find_repos(repo_list)?;
     let repo_name = get_single_selection(&repos)?;
@@ -104,8 +103,7 @@ fn find_repos(paths: Vec<PathBuf>) -> Result<HashMap<OsString, Repository>> {
                 // path to add to fuzzy finder
                 let name = path.as_ref().unwrap().file_name().to_os_string();
                 //let path_str = path.as_ref().unwrap().path().into_os_string();
-                let path_with_dot_bar_str =
-                    PathBuf::from(path.as_ref().unwrap().path().join(".bare"));
+                let path_with_dot_bar_str = path.as_ref().unwrap().path().join(".bare");
                 //println!("{}", name.to_string_lossy());
                 //println!(".bare - {}", path_with_dot_bar_str.to_string_lossy());
 
@@ -116,8 +114,7 @@ fn find_repos(paths: Vec<PathBuf>) -> Result<HashMap<OsString, Repository>> {
                 } else if path_with_dot_bar_str.is_dir() {
                     //println!(".bare");
                     // check for .bare folder
-                    let repo =
-                        git2::Repository::open(PathBuf::from(path_with_dot_bar_str)).unwrap();
+                    let repo = git2::Repository::open(path_with_dot_bar_str).unwrap();
                     repos.insert(name, repo);
                 } else {
                     // unhandled type
@@ -133,9 +130,9 @@ fn find_repos(paths: Vec<PathBuf>) -> Result<HashMap<OsString, Repository>> {
 
 fn get_single_selection(repos: &HashMap<OsString, Repository>) -> Result<String> {
     let options = SkimOptionsBuilder::default()
-        .height(Some("50%"))
+        .height("50%".to_string())
         .multi(false)
-        .color(Some("dark"))
+        .color(Some("dark".to_string()))
         .build()
         .unwrap();
     let item_reader = SkimItemReader::default();
