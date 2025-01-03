@@ -1,134 +1,160 @@
-use anyhow::anyhow;
-use anyhow::Result;
-use git2::Repository;
-use shellexpand::tilde;
-use skim::prelude::Skim;
-use skim::prelude::SkimItemReader;
-use skim::prelude::SkimOptionsBuilder;
+use clap::CommandFactory;
+use clap::Parser;
+use clap_complete::CompleteEnv;
+use error_stack::Report;
+use error_stack::ResultExt;
+use gix::Repository;
+use skim::prelude::*;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env;
-use std::error::Error;
-use std::ffi::OsStr;
-use std::ffi::OsString;
 use std::fs;
 use std::io::Cursor;
-use std::path::PathBuf;
-use std::process;
-use tmux_sessionizer::cli::create_app;
+use tms::cli::Cli;
+use tms::cli::SubCommandGiven;
+use tms::configs::Config;
+use tms::configs::SearchDirectory;
+use tms::error::Result;
+use tms::error::Suggestion;
+use tms::error::TmsError;
+use tms::tmux::Tmux;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let _cli_args = create_app();
-
-    let repo_list = vec![
-        PathBuf::from(tilde("~/repos/personal").to_string().as_str()),
-        PathBuf::from(tilde("~/repos/work").to_string().as_str()),
-    ];
-
-    let repos = find_repos(repo_list)?;
-    let repo_name = get_single_selection(&repos)?;
-
-    //let found_repo = repos
-    //    .find_repo(&repo_name)
-    //    .context("Could not find the internal representation of the selected repository")
-    //    .unwrap();
-    let sessions = String::from_utf8(execute_tmux_command("tmux list-sessions -F #S")?.stdout)?;
-    let mut sessions = sessions.lines();
-    let session_previously_existed = sessions.any(|line| {
-        // tmux will return the output with extra ' and \n characters
-        line.to_owned().retain(|char| char != '\'' && char != '\n');
-        line == repo_name
+fn main() -> Result<()> {
+    Report::install_debug_hook::<Suggestion>(|value, context| {
+        context.push_body(format!("{value}"));
     });
-    let found_repo = repos.get(&OsString::from(&repo_name)).unwrap();
+    #[cfg(any(not(debug_assertions), test))]
+    Report::install_debug_hook::<std::panic::Location>(|_value, _context| {});
 
-    let head = found_repo.head()?;
-    let path_to_default_tree = format!(
-        "{}/{}",
-        found_repo.path().parent().unwrap().to_string_lossy(),
-        head.shorthand().unwrap()
-    );
-
-    let path = if found_repo.path().file_name().unwrap() == OsStr::new(".bare") {
-        if found_repo.worktrees()?.is_empty() {
-            std::path::Path::new(&path_to_default_tree)
-        } else {
-            found_repo.path().parent().unwrap()
+    let bin_name = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_name().map(|exe| exe.to_string_lossy().to_string()))
+        .unwrap_or("tms".into());
+    match CompleteEnv::with_factory(Cli::command)
+        .bin(bin_name)
+        .try_complete(env::args_os(), None)
+    {
+        Ok(true) => return Ok(()),
+        Err(e) => {
+            panic!("failed to generate completions: {e}");
         }
-    } else {
-        found_repo.path().parent().unwrap()
+        Ok(false) => {}
     };
 
-    let path_str = path.to_string_lossy();
-    if !session_previously_existed {
-        execute_tmux_command(&format!("tmux new-session -ds {repo_name} -c {path_str}",))?;
-        //set_up_tmux_env(found_repo, &repo_name)?;
+    let cli_args = Cli::parse();
+
+    let tmux = Tmux::default();
+
+    let config = match cli_args.handle_sub_commands(&tmux)? {
+        SubCommandGiven::Yes => return Ok(()),
+        SubCommandGiven::No(config) => config, // continue
+    };
+
+    let repos = find_repos(&config)?;
+    println!("repos {:?}", repos);
+    // let repo_list: Vec<String> = repos.keys().map(|s| s.to_owned()).collect();
+
+    let selected_str = if let Some(str) = get_single_selection(&repos)? {
+        str
+    } else {
+        return Ok(());
+    };
+
+    if let Some(repo) = repos.get(&selected_str) {
+        let repo_worktrees = repo.worktrees().unwrap();
+        let path = if repo.head_tree().unwrap().id.is_empty_tree() {
+            repo_worktrees
+                .iter()
+                .find(|r| {
+                    let base = r.base().unwrap();
+                    let base_filename = base.file_name().unwrap().to_str().unwrap();
+                    base_filename == "master" || base_filename == "main"
+                })
+                .unwrap()
+                .base()
+                .unwrap()
+        } else {
+            repo.work_dir().unwrap().to_path_buf()
+        };
+        println!("switch to {:?}", path);
+        let repo_name = selected_str.replace('.', "_");
+        if !tmux.session_exists(&repo_name) {
+            tmux.new_session(Some(&repo_name), Some(path.to_str().unwrap()));
+        }
+        tmux.switch_to_session(&repo_name);
     }
 
-    match env::var("TMUX") {
-        Ok(_val) => {
-            execute_tmux_command(&format!(
-                "tmux switch-client -t {}",
-                repo_name.replace('.', "_"),
-            ))?;
-        }
-        Err(_e) => {
-            execute_tmux_command(&format!(
-                "tmux attach-session -t {} -d",
-                repo_name.replace('.', "_"),
-            ))?;
-        }
-    }
-    //println!("{}", found_repo.path().display());
-    //println!("is-bare {}", found_repo.is_bare());
-    //println!("is-worktree {}", found_repo.is_worktree());
-    //println!("worktrees {}", found_repo.worktrees()?.get(0).unwrap());
-    //println!("path {}", path.display());
     Ok(())
 }
 
-fn find_repos(paths: Vec<PathBuf>) -> Result<HashMap<OsString, Repository>> {
+fn find_repos(config: &Config) -> Result<HashMap<String, Repository>> {
+    let directories = config.search_dirs().change_context(TmsError::ConfigError)?;
     let mut repos = HashMap::new();
-    let mut to_search = VecDeque::new();
-
-    paths
-        .iter()
-        //.for_each(|path| to_search.push_back(std::path::PathBuf::from(path)));
-        .for_each(|path| to_search.push_back(PathBuf::from(path)));
+    let mut to_search: VecDeque<SearchDirectory> = directories.into();
 
     while let Some(file) = to_search.pop_front() {
-        // check if dir exists
-        if file.is_dir() {
-            //println!("file: {}", file.clone().to_str().unwrap());
-            fs::read_dir(&file)?.for_each(|path| {
-                // path to add to fuzzy finder
-                let name = path.as_ref().unwrap().file_name().to_os_string();
-                //let path_str = path.as_ref().unwrap().path().into_os_string();
-                let path_with_dot_bar_str = path.as_ref().unwrap().path().join(".bare");
-                //println!("{}", name.to_string_lossy());
-                //println!(".bare - {}", path_with_dot_bar_str.to_string_lossy());
-
-                if let Ok(repo) = git2::Repository::open(path.unwrap().path().clone()) {
-                    //println!("repo");
-                    // if the dir is arepo add it
-                    repos.insert(name, repo);
-                } else if path_with_dot_bar_str.is_dir() {
-                    //println!(".bare");
-                    // check for .bare folder
-                    let repo = git2::Repository::open(path_with_dot_bar_str).unwrap();
-                    repos.insert(name, repo);
-                } else {
-                    // unhandled type
+        println!("checking {:?}", &file.path);
+        let repo_name = file
+            .path
+            .file_name()
+            .expect("a file name")
+            .to_str()
+            .unwrap()
+            .to_string();
+        if let Ok(repo) = gix::open(&file.path) {
+            // println!("found repo {:?}", &file.path);
+            match repo.kind() {
+                gix::repository::Kind::WorkTree { is_linked } => {
+                    if !is_linked {
+                        println!("found repo {:?}", &repo);
+                        repos.insert(repo_name, repo);
+                    }
                 }
-            });
+                gix::repository::Kind::Bare => {}
+                gix::repository::Kind::Submodule => {}
+            };
+        } else if file.path.is_dir() && file.depth == 0 {
+            let bare_path = file.path.join(".bare");
+            if let Ok(repo) = gix::open(&bare_path) {
+                match repo.kind() {
+                    gix::repository::Kind::WorkTree { is_linked } => {
+                        if !is_linked {
+                            println!("found repo {:?}", &repo);
+                            repos.insert(repo_name, repo);
+                        }
+                    }
+                    gix::repository::Kind::Bare => {}
+                    gix::repository::Kind::Submodule => {}
+                };
+            }
+        } else if file.path.is_dir() && file.depth > 0 {
+            match fs::read_dir(&file.path) {
+                Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!(
+                        "Warning: insufficient permissions to read '{:?}'. Skipping directory...",
+                        file.path
+                    );
+                }
+                result => {
+                    let read_dir = result
+                        .change_context(TmsError::IoError)
+                        .attach_printable_lazy(|| {
+                            format!("Could not read directory {:?}", file.path)
+                        })?
+                        .map(|dir_entry| dir_entry.expect("Found non-valid utf8 path").path());
+                    for dir in read_dir {
+                        to_search.push_back(SearchDirectory::new(dir, file.depth - 1))
+                    }
+                }
+            }
         }
     }
-
-    //println!("Done");
 
     Ok(repos)
 }
 
-fn get_single_selection(repos: &HashMap<OsString, Repository>) -> Result<String> {
+fn get_single_selection(repos: &HashMap<String, Repository>) -> Result<Option<String>> {
+    let mut error: Option<Report<TmsError>> = None;
     let options = SkimOptionsBuilder::default()
         .height("50%".to_string())
         .multi(false)
@@ -137,24 +163,18 @@ fn get_single_selection(repos: &HashMap<OsString, Repository>) -> Result<String>
         .unwrap();
     let item_reader = SkimItemReader::default();
     let mut skim_str = String::new();
-    let mut repos_vec: Vec<(&OsString, &Repository)> = repos.iter().collect();
+    let mut repos_vec: Vec<(&String, &Repository)> = repos.iter().collect();
     repos_vec.sort_by(|a, b| a.0.cmp(b.0));
     for name in repos_vec {
-        skim_str.push_str(&format!("{}\n", name.0.clone().into_string().unwrap()));
+        skim_str.push_str(&format!("{}\n", name.0.clone()));
     }
     let item = item_reader.of_bufread(Cursor::new(skim_str));
     let skim_output = Skim::run_with(&options, Some(item)).unwrap();
     if skim_output.is_abort {
-        return Err(anyhow!("No selection made"));
+        error = Some(TmsError::TuiError("No selection made".into()).into());
     }
-    Ok(skim_output.selected_items[0].output().to_string())
-}
-
-fn execute_tmux_command(command: &str) -> Result<process::Output> {
-    let args: Vec<&str> = command.split(' ').skip(1).collect();
-    Ok(process::Command::new("tmux")
-        .args(args)
-        .stdin(process::Stdio::inherit())
-        .output()
-        .unwrap_or_else(|_| panic!("Failed to execute the tmux command `{command}`")))
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok(Some(skim_output.selected_items[0].output().to_string()))
 }
